@@ -3,7 +3,7 @@
         help="Preload resized train and validation images into host RAM (about 4.2 GB at 224 px).",
     )
     parser.add_argument("--seed", type=int, default=3710)
-    parser.add_argument("--pos-weight", type=float, default=1.0)
+    parser.add_argument("--pos-weight", type=float, default=20.0)
     parser.add_argument("--no-pretrained", action="store_true")
     args = parser.parse_args()
 
