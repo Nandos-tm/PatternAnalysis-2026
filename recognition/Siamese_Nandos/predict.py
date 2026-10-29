@@ -66,3 +66,35 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-plots", action="store_true", help="Skip PNG visualisations")
     return parser.parse_args()
+def load_model(model_name: str, checkpoint_path: Path, device: torch.device):
+    """Build the requested architecture and load either training script's checkpoint."""
+    # Load onto CPU first. This avoids briefly allocating a second copy of the
+    # weights on a GPU and works even when a checkpoint was saved on another
+    # machine or accelerator.
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Expected a checkpoint dictionary saved by the training notebook/script.")
+
+    config = checkpoint.get("config") or {}
+    if model_name == "baseline":
+        # The baseline trainer saves weights under `state_dict`; the modular
+        # trainer may also use `model`. Both contain the same ResNet parameters.
+        model = ResNet18Baseline(pretrained=False)
+        state = checkpoint.get("state_dict", checkpoint.get("model"))
+    else:
+        # The notebook and modular trainer use slightly different names for
+        # the embedding size, so accept either. The classifier head and encoder
+        # must still match the checkpoint exactly when strict loading is used.
+        embedding_dim = int(config.get("embedding_dim", config.get("embed_dim", 128)))
+        model = SiameseNetWithClassifier(dim=embedding_dim, pretrained=False)
+        state = checkpoint.get("model", checkpoint.get("state_dict"))
+
+    if state is None:
+        raise ValueError(
+            f"Could not find model weights in {checkpoint_path}; expected 'model' or 'state_dict'."
+        )
+    model.load_state_dict(state, strict=True)
+    # Evaluation mode disables training-only layer behaviour, such as dropout
+    # and batch-normalisation updates, before predictions are generated.
+    model.to(device).eval()
+    return model, checkpoint
