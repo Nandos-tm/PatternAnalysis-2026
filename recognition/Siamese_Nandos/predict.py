@@ -98,3 +98,49 @@ def load_model(model_name: str, checkpoint_path: Path, device: torch.device):
     # and batch-normalisation updates, before predictions are generated.
     model.to(device).eval()
     return model, checkpoint
+
+    def infer(model, model_name: str, frame: pd.DataFrame, image_paths, args, device):
+    """Return ordered logits and labels for one official split manifest."""
+    # Reuse dataset.py rather than duplicating image loading and transforms.
+    # `train=False` is important here: validation and test images should not
+    # receive the random flips and rotations used to augment training images.
+    dataset = ISICImageDataset(
+        frame,
+        image_paths,
+        transform=make_transform(args.image_size, train=False),
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        # Keep the manifest order. The saved CSVs can then be joined directly
+        # to the official split by image name, and the check below catches any
+        # accidental shuffle or mismatch.
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.workers > 0,
+    )
+
+    # Store model outputs as logits first. Sigmoid is applied once later, after
+    # concatenation, so inference and thresholding use the same score format.
+    all_logits, all_labels, all_names = [], [], []
+    amp_enabled = device.type == "cuda"
+    with torch.inference_mode():
+        for images, labels, names in loader:
+            images = images.to(device, non_blocking=True)
+            # Both models return one melanoma logit per image. The Siamese
+            # network was trained with pairs, but its auxiliary classifier
+            # predicts from a single image at evaluation time, just as in its
+            # notebook. The pairwise embedding head is not used for this result.
+            # Mixed precision mirrors notebook inference on GPU; CPU inference
+            # stays in full precision because autocast is disabled there.
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                if model_name == "baseline":
+                    logits = model(images)
+                else:
+                    logits = model.classify(images)
+            all_logits.extend(logits.float().cpu().numpy().reshape(-1).tolist())
+            all_labels.extend(labels.numpy().astype(int).tolist())
+            all_names.extend(names)
+
+
