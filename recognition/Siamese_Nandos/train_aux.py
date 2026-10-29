@@ -1,63 +1,6 @@
-"""Train the auxiliary-head Siamese model using the notebook's loss and schedule."""
 
-from __future__ import annotations
-
-import argparse
-import random
-import time
-from pathlib import Path
-import numpy as np
-import pandas as pd
-import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
-from torch import nn
-from torch.utils.data import DataLoader
-
-from dataset import ISICImageDataset, PairDataset, index_images, make_transform
-from modules import SiameseNetWithClassifier, contrastive_loss
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--splits", required=True, help="Directory containing train.csv and val.csv")
-    parser.add_argument("--images", required=True, help="Directory containing extracted JPEGs")
-    parser.add_argument("--output", required=True)
-    parser.add_argument("--epochs", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=64, help="Pairs per batch")
-    parser.add_argument("--pairs-per-epoch", type=int, default=24000)
-    parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--embedding-dim", type=int, default=128)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--class-loss-weight", type=float, default=1.0)
-    parser.add_argument("--margin", type=float, default=1.0)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=3710)
-    parser.add_argument("--no-pretrained", action="store_true")
-    parser.add_argument("--resume", action="store_true")
-    args = parser.parse_args()
-
-    if args.pairs_per_epoch % args.batch_size:
-        raise ValueError("pairs-per-epoch must be divisible by batch-size.")
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    splits, output = Path(args.splits), Path(args.output)
-    output.mkdir(parents=True, exist_ok=True)
-    train_df = pd.read_csv(splits / "train.csv")
-    val_df = pd.read_csv(splits / "val.csv")
-    if "patient_id" in train_df and "patient_id" in val_df:
-        if not set(train_df.patient_id).isdisjoint(val_df.patient_id):
-            raise ValueError("Patient overlap between training and validation splits.")
-    paths = index_images(args.images)
-    required = set(train_df.image_name.astype(str)) | set(val_df.image_name.astype(str))
-    missing = required - paths.keys()
-    if missing:
-        raise FileNotFoundError(f"{len(missing)} split images missing; examples: {list(missing)[:5]}")
-
+    # Training samples pairs on demand. Validation instead passes single images
+    # through the classifier head, which is the model's melanoma score output.
     pair_ds = PairDataset(train_df, paths, args.pairs_per_epoch, args.seed)
     train_loader = DataLoader(
         pair_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
@@ -73,11 +16,15 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     criterion = nn.BCEWithLogitsLoss()
     use_amp = device.type == "cuda"
+    # Prefer BF16 where available; FP16 uses a scaler to protect small gradients.
+    # On CPU, autocast and scaling are disabled.
     amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
     best_ap, start_epoch, history = -1.0, 0, []
     last_path, best_path = output / "last.pt", output / "best.pt"
     if args.resume:
+        # Resume the optimiser and scaler as well as the weights so the next
+        # update continues from the saved training state.
         checkpoint = torch.load(last_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -96,6 +43,8 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                 z_a, z_b, logit_a, logit_b = model(a, b)
+                # The metric term shapes the embedding space; the BCE term
+                # trains the auxiliary head to classify each endpoint directly.
                 metric_loss = contrastive_loss(z_a, z_b, same, args.margin)
                 class_loss = 0.5 * (criterion(logit_a, y_a) + criterion(logit_b, y_b))
                 loss = metric_loss + args.class_loss_weight * class_loss
@@ -114,6 +63,8 @@ def main():
                 logits.extend(score.cpu().numpy().tolist())
                 labels.extend(y.numpy().tolist())
                 names.extend(image_names)
+        # AP is useful for this highly imbalanced validation set; AUROC is also
+        # recorded to describe ranking performance across class thresholds.
         ap = float(average_precision_score(labels, logits))
         auc = float(roc_auc_score(labels, logits))
         row = {
@@ -131,6 +82,7 @@ def main():
             "image_name": names, "target": labels, "score_logit": logits,
             "score_probability": probabilities,
         })
+        # Keep the weights and predictions from the same best-AP epoch.
         if ap > best_ap:
             best_ap = ap
             torch.save({
@@ -150,4 +102,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
