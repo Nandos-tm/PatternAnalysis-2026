@@ -378,3 +378,21 @@ def main() -> None:
     # be skipped for a faster run with --no-plots.
     if not args.no_plots:
         save_plots(test_labels, test_scores, threshold, output_dir)
+
+ print(f"Model: {metrics['model']}")
+    print(f"Device: {metrics['device']}")
+    print(f"Checkpoint: {checkpoint_path} (epoch {checkpoint.get('epoch')})")
+    print(f"Validation threshold policy: {policy}")
+    print(f"Cut-off: {threshold:.6g}")
+    print(f"Test average precision: {results['average_precision']:.4f}")
+    print(f"Test AUROC: {results['auroc']:.4f}")
+    print(f"Melanoma precision: {results['melanoma_precision']:.4f}")
+    print(f"Melanoma recall: {results['melanoma_recall']:.4f}")
+    print(f"Specificity: {results['specificity']:.4f}")
+    print(f"TN={results['tn']:,}  FP={results['fp']:,}  FN={results['fn']:,}  TP={results['tp']:,}")
+    print(f"Saved predictions and metrics to {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
+
