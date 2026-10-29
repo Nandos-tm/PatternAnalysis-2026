@@ -1,12 +1,16 @@
-
-    # Training samples pairs on demand. Validation instead passes single images
-    # through the classifier head, which is the model's melanoma score output.
-    pair_ds = PairDataset(train_df, paths, args.pairs_per_epoch, args.seed)
+        ),
+        image_cache=image_cache,
+    )
     train_loader = DataLoader(
         pair_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.workers,
         pin_memory=device.type == "cuda", persistent_workers=args.workers > 0,
     )
-    val_ds = ISICImageDataset(val_df, paths, make_transform(args.image_size))
+    val_ds = ISICImageDataset(
+        val_df,
+        paths,
+        make_transform(args.image_size, resize=image_cache is None),
+        image_cache=image_cache,
+    )
     val_loader = DataLoader(
         val_ds, batch_size=64, shuffle=False, num_workers=args.workers,
         pin_memory=device.type == "cuda", persistent_workers=args.workers > 0,
