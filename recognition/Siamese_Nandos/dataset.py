@@ -1,22 +1,12 @@
-def index_images(image_dir: str | Path) -> dict[str, Path]:
-    """Map image stem to path; rejects duplicate stems to avoid silent misalignment."""
-    # The split CSVs contain image IDs rather than full paths. Index the image
-    # tree once so each dataset lookup is quick and tied to the correct row.
-    paths: dict[str, Path] = {}
-    for path in Path(image_dir).rglob("*"):
-        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg"}:
-            if path.stem in paths:
-                raise ValueError(f"Duplicate image ID {path.stem}: {paths[path.stem]} and {path}")
-            paths[path.stem] = path
-    return paths
-
-
-class ISICImageDataset(Dataset):
-    """One row per image; returns (tensor, target, image_name)."""
-
-    def __init__(self, frame: pd.DataFrame, image_paths: dict[str, Path], transform=None):
+        self,
+        frame: pd.DataFrame,
+        image_paths: dict[str, Path],
+        transform=None,
+        image_cache: ImageCache | None = None,
+    ):
         self.frame = frame.reset_index(drop=True)
         self.image_paths = image_paths
+        self.image_cache = image_cache
         self.transform = transform or make_transform()
 
     def __len__(self):
@@ -27,8 +17,15 @@ class ISICImageDataset(Dataset):
         # Match the manifest row to its JPEG. Converting to RGB gives the model
         # a consistent three-channel input for every image.
         name = Path(str(row["image_name"]).strip()).stem
-        with Image.open(self.image_paths[name]) as image:
-            x = self.transform(image.convert("RGB"))
+        if self.image_cache is not None:
+            # The cache already contains an RGB copy, so the source JPEG does
+            # not need to be reopened for every epoch or validation pass.
+            image = self.image_cache.get_image(name)
+            x = self.transform(image)
+        else:
+            # Keep the low-memory path available when caching is not enabled.
+            with Image.open(self.image_paths[name]) as image:
+                x = self.transform(image.convert("RGB"))
         return x, int(row["target"]), name
 
 
@@ -46,12 +43,14 @@ class PairDataset(Dataset):
         n_pairs: int,
         seed: int = 3710,
         transform=None,
+        image_cache: ImageCache | None = None,
     ):
         self.frame = frame.reset_index(drop=True)
         self.image_paths = image_paths
         self.n_pairs = int(n_pairs)
         self.seed = int(seed)
         self.epoch = 0
+        self.image_cache = image_cache
         self.transform = transform or make_transform(train=True)
         # Save row indices by class now instead of filtering the DataFrame for
         # every pair sampled during an epoch.
@@ -74,6 +73,11 @@ class PairDataset(Dataset):
 
     def _load(self, row):
         key = Path(str(row["image_name"]).strip()).stem
+        if self.image_cache is not None:
+            # Repeated pair sampling can revisit an image many times. Loading
+            # its resized pixels from RAM avoids repeated JPEG decoding while
+            # still applying a fresh random augmentation on each sampled use.
+            return self.transform(self.image_cache.get_image(key))
         with Image.open(self.image_paths[key]) as image:
             return self.transform(image.convert("RGB"))
 
