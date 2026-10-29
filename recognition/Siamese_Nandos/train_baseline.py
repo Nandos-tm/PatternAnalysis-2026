@@ -1,3 +1,64 @@
+        "--cache-images",
+        action="store_true",
+        help="Preload resized train and validation images into host RAM (about 4.2 GB at 224 px).",
+    )
+    parser.add_argument("--seed", type=int, default=3710)
+    parser.add_argument("--pos-weight", type=float, default=1.0)
+    parser.add_argument("--no-pretrained", action="store_true")
+    args = parser.parse_args()
+
+    # Fix the random ordering and initialisation so a run can be reproduced
+    # from the same split files and settings.
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    splits, output = Path(args.splits), Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    train_df, val_df = pd.read_csv(splits / "train.csv"), pd.read_csv(splits / "val.csv")
+    paths = index_images(args.images)
+    required = set(train_df.image_name.astype(str)) | set(val_df.image_name.astype(str))
+    missing = required - paths.keys()
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} split images missing; examples: {list(missing)[:5]}")
+
+    # One shared cache avoids decoding and resizing the same JPEGs every epoch.
+    # It contains train and validation images only; random augmentation remains
+    # active for training because pixels are cached before the transform runs.
+    image_cache = None
+    if args.cache_images:
+        image_names = list(train_df.image_name) + list(val_df.image_name)
+        image_cache = ImageCache(image_names, paths, args.image_size)
+        print(
+            f"Cached {len(image_cache):,} train/validation images "
+            f"({image_cache.memory_gb:.2f} GB in RGB uint8 pixels)."
+        )
+
+    # Augmentation is only used for training. The validation transform is fixed
+    # so that a change in its score reflects the model, not a random crop/flip.
+    # Cached images were resized during preload, so skip Resize in their
+    # transforms; without caching, the ordinary on-demand path resizes each JPEG.
+    train_ds = ISICImageDataset(
+        train_df,
+        paths,
+        make_transform(args.image_size, train=True, resize=image_cache is None),
+        image_cache=image_cache,
+    )
+    val_ds = ISICImageDataset(
+        val_df,
+        paths,
+        make_transform(args.image_size, resize=image_cache is None),
+        image_cache=image_cache,
+    )
+    loader_args = {
+        "num_workers": args.workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": args.workers > 0,
+    }
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, **loader_args)
     model = ResNet18Baseline(pretrained=not args.no_pretrained).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate,
                                   weight_decay=args.weight_decay)
