@@ -1,4 +1,4 @@
-""Run held-out evaluation for the COMP3710 ISIC 2020 classifiers.
+"""Run held-out evaluation for the COMP3710 ISIC 2020 classifiers.
 
 The script follows the notebook evaluation pattern: use the validation split
 to choose an operating threshold, then report the held-out test performance.
