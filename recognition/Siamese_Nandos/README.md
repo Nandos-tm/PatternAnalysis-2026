@@ -3,6 +3,47 @@
 ## StudentID: 48036261
 ## Name: Thirumurugan Thirunanthanan (Nandos)
 
+## Feasibility Review: Melanoma Classification
+
+| Project | Proposed model | Difficulty |
+|---|---|---|
+| ISIC 2020 dermoscopic images | Siamese network | Hard |
+
+### Feasibility decision
+
+The project is feasible as a research prototype for prioritising lesions for clinician review. It is not scoped or evidenced as an autonomous diagnostic or population-screening system. Proceed with the Siamese model and a ResNet-18 baseline, subject to patient-level separation, validation-only threshold selection and explicit reporting of the false-negative and referral burden.
+
+### User need and scope
+
+The intended users are dermatology clinicians or trained image reviewers who need decision support when assessing dermoscopic lesions. The prototype classifies supplied images as melanoma or benign and investigates whether pairwise representation learning improves triage over a conventional CNN. A positive or uncertain result is for expert review; a negative result must not be treated as ruling out melanoma.
+
+### Testable acceptance criteria
+
+- Keep all images from each patient in exactly one split; verify that the 70/15/15 train, validation and test partitions have no patient overlap.
+- Train and compare the Siamese model and ResNet-18 baseline on the same partitions; report AP, AUROC, accuracy, macro-F1, per-class precision and recall.
+- Select the operating threshold using validation data only, targeting at least 80% specificity while maximising melanoma sensitivity; report test performance at that fixed threshold without retuning.
+- Inspect 3–5 held-out test errors, including false positives and false negatives, and document image-level observations as plausible triggers rather than proven causes.
+- Run inference over all 5,000 test images on one Colab GPU; record GPU type, peak allocated VRAM and inference time, with a prototype resource target below 8 GB VRAM.
+
+### Model choice and preliminary evidence
+
+The audited ISIC 2020 cohort contains 33,126 images from 2,056 patients; 584 images are melanoma (1.76%). The planned patient-separated split contains 23,188 training images (403 melanoma), 4,938 validation images (92 melanoma) and 5,000 test images (89 melanoma). The audit found 425 duplicate pairs, none crossing patient IDs, and no conflicting lesion labels. These checks support a feasible leakage-controlled experiment, while the small positive class remains a major limitation.
+
+The baseline is an ImageNet-pretrained ResNet-18 with weighted binary cross-entropy. The hard-level Siamese model uses a shared ResNet-18 encoder, a 128-dimensional embedding, contrastive loss and an auxiliary binary classifier. Transfer learning, residual CNNs, metric learning, imbalance-aware sampling, patient-grouped validation and precision–recall evaluation provide the relevant course concepts. The baseline smoke test and completed training runs demonstrate that the pipeline is operational on Colab GPUs.
+
+### Risks, resource budget and fallback
+
+The 1.76% melanoma prevalence makes accuracy alone misleading; balanced pair sampling increases exposure but does not create new melanoma patients and may increase overfitting. Validation-selected specificity may not transfer to the test cohort, and repeated inspection of test results can make those results exploratory. Colab GPU availability and session time are additional constraints; save checkpoints and split manifests to Drive, and do not commit datasets or model weights.
+
+If the Siamese model fails to improve the clinically relevant trade-off or exceeds the resource target, retain ResNet-18 as the simpler benchmark and recommend human-reviewed triage only. Neither model should advance to clinical use without external validation, calibration and workflow assessment.
+
+### Selected sources
+
+- SIIM-ISIC 2020 Challenge Dataset, [doi:10.34970/2020-DS01](https://doi.org/10.34970/2020-DS01).
+- He et al., “Deep Residual Learning for Image Recognition” (2016), [doi:10.1109/CVPR.2016.90](https://doi.org/10.1109/CVPR.2016.90).
+- Koch et al., “Siamese Neural Networks for One-shot Image Recognition” (2015).
+
+
 ## 1 Introduction
 
 
