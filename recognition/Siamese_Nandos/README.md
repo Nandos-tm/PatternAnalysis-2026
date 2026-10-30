@@ -1,6 +1,10 @@
 # Melanoma Classification: ResNet-18 Baseline and Siamese Auxiliary-Head Model
 
+## StudentID: 48036261
+## Name: Thirumurugan Thirunanthanan (Nandos)
+
 ## 1 Introduction
+
 
 Melanoma detection is a relevant Australian health problem because Australia has one of the highest melanoma incidence rates in the world. The Australian Institute of Health and Welfare estimated 17,400 new cases in 2025; this is a projection based on earlier incidence data, not a final observed count ([Australian Institute of Health and Welfare, 2026](https://www.aihw.gov.au/reports/cancer/cancer-data-in-australia/contents/cancer-data-commentaries/melanoma-of-the-skin-in-australia)). Early detection matters because deeper and thicker melanomas are more difficult to treat ([Cancer Council Australia, n.d.-a](https://www.cancer.org.au/about-us/policy-and-advocacy/prevention/uv-radiation/related-resources/early-detection-of-skin-cancer)). This project does not propose population-wide automated screening. Australia has no formal population melanoma screening program; Cancer Council Australia does not recommend population-based skin-cancer screening because evidence that it reduces mortality is insufficient ([Cancer Council Australia, n.d.-b](https://www.cancer.org.au/about-us/policy-and-advocacy/prevention/uv-radiation/related-resources/detection-and-screening)). Guidance instead supports seeking medical advice for new or changing lesions and targeted assessment for people at higher risk ([Cancer Council Australia, n.d.-a](https://www.cancer.org.au/about-us/policy-and-advocacy/prevention/uv-radiation/related-resources/early-detection-of-skin-cancer)).
 
