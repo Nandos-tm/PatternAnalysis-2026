@@ -176,3 +176,59 @@ each launch, writes a unique log per attempt, and records commands. Set
 `last.pt` there. Use a fresh run for models that have not started. The notebook's
 Git commit pin must be updated after code fixes; editing local files does not
 change an already-cloned remote checkout.
+
+## Script-generated review evidence
+
+Both trainers now write `learning_curves.png`, a `run_manifest.json` (arguments,
+Python/package versions, Git revision and dirty status, split SHA-256 hashes),
+and validation classification loss in `history.csv`. Resumed runs also write
+`resume_manifest.json`. `peak_epoch_allocated_mib` measures peak CUDA allocation
+across training and validation; CPU runs leave this blank. The baseline loss is
+weighted BCE; Siamese validation loss is unweighted classifier BCE, not its
+paired contrastive-plus-classifier training objective. Do not interpret those
+curves as identical objectives.
+
+The existing `predict.py` command now produces:
+
+- `test_metrics.csv`: accuracy, both classes' precision/recall/F1, macro-F1,
+  AUROC, average precision, trapezoidal PR-AUC, Brier score and 10-bin ECE.
+  Average precision and trapezoidal PR-AUC are reported separately.
+- `validation_predictions.csv` and `test_predictions.csv`, including the fixed
+  threshold's predictions and referral decisions.
+- Confusion, PR, ROC, reliability and correct/incorrect confidence plots.
+  `--no-plots` skips generating plots. Calibration bin counts are in
+  `calibration.csv`; group summaries are in `confidence_summary.csv`.
+- `failure_cases.csv`: incorrect predictions ordered by the score assigned to
+  the predicted class. Inspect the source images and write your own visible
+  characteristics and plausible causes; this file does not establish causes.
+- `resource_profile.csv`: total/trainable parameter counts, batch-one mean and
+  median forward latency after five warm-up passes over twenty measurements,
+  and peak CUDA allocated memory. Timing excludes JPEG loading, preprocessing
+  and host-to-device transfer. CUDA calls are synchronized; GPU inference uses
+  FP16 autocast and CPU inference uses FP32. CPU VRAM is blank, not zero.
+  The Siamese profile measures its auxiliary classifier inference path.
+
+`--referral-fraction 0.2` (default) selects a symmetric band around the operating
+cutoff using the validation quantile of distance to that cutoff. Test images
+inside the band are referred. Ties can increase the validation referral rate;
+actual test workload can differ. Use `--referral-fraction 0` to disable referral.
+The report includes automatic coverage, automatic accuracy, referred melanomas
+and melanoma false negatives left outside referral. This is a workload-based
+experimental policy, not a clinically validated sensitivity guarantee. Scores
+from weighted/paired training are not assumed to be calibrated probabilities.
+The confidence plot uses the score assigned to the thresholded predicted class,
+which can be below 0.5 when the operating threshold differs from 0.5.
+
+For Siamese embedding evaluation, append `--prototype` to the prediction command.
+This requires training JPEGs as well as validation/test JPEGs. The script takes
+class means of training embeddings only, computes squared distances to both
+prototypes, and uses sigmoid(distance-to-benign minus distance-to-melanoma) as
+a bounded ranking score. It independently selects its threshold using validation
+and `--threshold-policy`; the auxiliary head's `--threshold` is not reused.
+Results and saved training prototypes are under `prototype/`. These scores are
+not calibrated probabilities. The classifier's resource profile does not include
+prototype scoring or prototype construction.
+
+These changes do not replace the historical experiment results. Run both models
+and evaluation from a clean checkout with the real images before updating any
+reported numbers. Keep the same split, hardware and evaluation settings for both.

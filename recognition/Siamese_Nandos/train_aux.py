@@ -17,6 +17,7 @@ from dataset import ImageCache, ISICImageDataset, PairDataset, index_images, mak
 from modules import SiameseNetWithClassifier, contrastive_loss
 from split_utils import load_splits
 from runtime import select_device
+from reporting import plot_history, write_manifest
 from training_utils import (prepare_output, atomic_save, atomic_csv, capture_rng,
                             restore_rng, manifest_hashes, validate_resume, Progress, epoch_complete)
 
@@ -119,7 +120,10 @@ def main():
         restore_rng(checkpoint["rng"])
         print(f"Resuming after epoch {start_epoch}", flush=True)
 
+    write_manifest(output, args, hashes, "resume_manifest.json" if args.resume else "run_manifest.json")
     for epoch in range(start_epoch, args.epochs):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         pair_ds.set_epoch(epoch)
         model.train()
         totals = np.zeros(3, dtype=np.float64)
@@ -144,12 +148,14 @@ def main():
 
         model.eval()
         logits, labels, names = [], [], []
+        validation_loss = 0.0
         progress = Progress("validation", epoch + 1, args.epochs, len(val_loader), args.log_every)
         with torch.inference_mode():
             for batch, (x, y, image_names) in enumerate(val_loader, 1):
                 x = x.to(device)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     score = model.classify(x).float()
+                validation_loss += criterion(score, y.to(device, dtype=torch.float32)).item() * len(y)
                 logits.extend(score.cpu().numpy().tolist())
                 labels.extend(y.numpy().tolist())
                 names.extend(image_names)
@@ -167,6 +173,8 @@ def main():
             "val_auroc": auc,
             "seconds": time.time() - started,
         }
+        row["val_classification_loss"] = validation_loss / len(val_ds)
+        row["peak_epoch_allocated_mib"] = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else None
         history.append(row)
         probabilities = 1 / (1 + np.exp(-np.clip(np.asarray(logits), -40, 40)))
         predictions = pd.DataFrame({
@@ -190,6 +198,7 @@ def main():
             "rng": capture_rng(), "manifest_hashes": hashes,
         }, last_path)
         atomic_csv(pd.DataFrame(history), output / "history.csv")
+        plot_history(history, output)
         epoch_complete(row, history, args.epochs)
     print(f"Best validation AP: {best_ap:.6f}; checkpoint: {best_path}")
 

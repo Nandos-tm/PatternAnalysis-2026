@@ -139,7 +139,18 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(pd.read_csv(evaluation / "test_predictions.csv")), 4)
             metrics = pd.read_csv(evaluation / "test_metrics.csv")
             self.assertFalse(metrics.validation_recall_at_threshold.isna().any())
-            self.assertEqual(len(list(evaluation.glob("*.png"))), 3)
+            self.assertEqual(len(list(evaluation.glob("*.png"))), 5)
+            self.assertTrue((output / "learning_curves.png").is_file())
+            self.assertTrue((output / "run_manifest.json").is_file())
+            self.assertTrue((evaluation / "resource_profile.csv").is_file())
+            for metric in ("test_accuracy", "test_macro_f1", "test_benign_recall", "test_brier_score"):
+                self.assertTrue(metrics[metric].between(0, 1).all())
+            if name == "siamese_aux":
+                self.run_script("predict.py", "--model", name, "--checkpoint", output / "best.pt",
+                                "--splits", self.splits, "--images", self.images, "--output", evaluation,
+                                "--image-size", 32, "--workers", 0, "--device", "cpu", "--prototype",
+                                "--threshold-policy", "val_recall70_max_precision", "--no-plots")
+                self.assertEqual(len(pd.read_csv(evaluation / "prototype/test_predictions.csv")), 4)
 
 
 if __name__ == "__main__":

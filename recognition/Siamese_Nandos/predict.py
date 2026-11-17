@@ -33,6 +33,9 @@ from dataset import ISICImageDataset, index_images, make_transform
 from modules import ResNet18Baseline, SiameseNetWithClassifier
 from split_utils import load_splits
 from runtime import select_device
+from training_utils import manifest_hashes
+from reporting import (extra_metrics, confidence_report, choose_referral_band,
+                       referral_report, profile_model, write_manifest)
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +75,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Use a previously chosen cutoff instead of selecting one from validation.",
     )
+    parser.add_argument("--referral-fraction", type=float, default=0.2,
+                        help="Validation fraction nearest the cutoff to refer (default 0.2; ties may exceed it)")
+    parser.add_argument("--prototype", action="store_true",
+                        help="Also evaluate training-class prototypes (Siamese only; requires train images)")
     parser.add_argument("--no-plots", action="store_true", help="Skip PNG visualisations")
     return parser.parse_args()
 
@@ -110,7 +117,7 @@ def load_model(model_name: str, checkpoint_path: Path, device: torch.device):
     return model, checkpoint
 
 
-def infer(model, model_name: str, frame: pd.DataFrame, image_paths, args, device):
+def infer(model, model_name: str, frame: pd.DataFrame, image_paths, args, device, embeddings=False):
     """Return ordered logits and labels for one official split manifest."""
     # Reuse dataset.py rather than duplicating image loading and transforms.
     # `train=False` is important here: validation and test images should not
@@ -146,11 +153,14 @@ def infer(model, model_name: str, frame: pd.DataFrame, image_paths, args, device
             # Mixed precision mirrors notebook inference on GPU; CPU inference
             # stays in full precision because autocast is disabled there.
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-                if model_name == "baseline":
+                if embeddings:
+                    logits = model.embed(images)
+                elif model_name == "baseline":
                     logits = model(images)
                 else:
                     logits = model.classify(images)
-            all_logits.extend(logits.float().cpu().numpy().reshape(-1).tolist())
+            values = logits.float().cpu().numpy()
+            all_logits.extend(values.tolist() if embeddings else values.reshape(-1).tolist())
             all_labels.extend(labels.numpy().astype(int).tolist())
             all_names.extend(names)
 
@@ -191,6 +201,8 @@ def choose_threshold(y_true: np.ndarray, scores: np.ndarray, policy: str):
     # Keeping every ROC point matters here because an intermediate threshold
     # could be the best cutoff satisfying the 80% specificity requirement.
     fpr, tpr, thresholds = roc_curve(y_true, scores, drop_intermediate=False)
+    # Replace the all-negative ROC sentinel with an equivalent finite cutoff.
+    thresholds = np.where(np.isfinite(thresholds), thresholds, np.nextafter(scores.max(), np.inf))
     specificity = 1.0 - fpr
     eligible = np.flatnonzero(specificity >= 0.80)
     if not len(eligible):
@@ -215,6 +227,7 @@ def summarize(y_true: np.ndarray, scores: np.ndarray, threshold: float):
     predicted = (scores >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, predicted, labels=[0, 1]).ravel()
     return {
+        **extra_metrics(y_true, scores, threshold),
         "average_precision": float(average_precision_score(y_true, scores)),
         "auroc": float(roc_auc_score(y_true, scores)),
         "melanoma_precision": float(tp / (tp + fp)) if tp + fp else 0.0,
@@ -278,11 +291,52 @@ def save_plots(y_true: np.ndarray, scores: np.ndarray, threshold: float, output:
     plt.close(fig)
 
 
+def evaluate_prototypes(model, frames, image_paths, args, device, output):
+    """Fit prototypes on training only; threshold the distance margin on validation."""
+    folder = output / "prototype"
+    folder.mkdir(exist_ok=True)
+    train_z, train_y, _ = infer(model, args.model, frames["train"], image_paths, args, device, embeddings=True)
+    if len(np.unique(train_y)) != 2:
+        raise ValueError("Prototype fitting requires both training classes")
+    prototypes = np.stack([train_z[train_y == label].mean(axis=0) for label in (0, 1)])
+    np.save(folder / "training_prototypes.npy", prototypes)
+    predictions = {}
+    for split in ("val", "test"):
+        z, labels, names = infer(model, args.model, frames[split], image_paths, args, device, embeddings=True)
+        distances = ((z[:, None, :] - prototypes[None, :, :]) ** 2).sum(axis=2)
+        # A positive margin favours melanoma. Its sigmoid is a bounded score,
+        # not a calibrated probability; no test labels fit this transformation.
+        margin = distances[:, 0] - distances[:, 1]
+        scores = 1 / (1 + np.exp(-np.clip(margin, -40, 40)))
+        predictions[split] = (labels, scores, names, distances)
+    val_y, val_scores, _, _ = predictions["val"]
+    threshold, _ = choose_threshold(val_y, val_scores, args.threshold_policy)
+    low, high = choose_referral_band(val_scores, threshold, args.referral_fraction)
+    for split, (labels, scores, names, distances) in predictions.items():
+        referred, referral = referral_report(labels, scores, threshold, low, high)
+        pd.DataFrame({"image_name": names, "target": labels, "distance_squared_benign": distances[:, 0],
+                      "distance_squared_melanoma": distances[:, 1], "score": scores,
+                      "prediction": (scores >= threshold).astype(int), "referred": referred}).to_csv(
+                          folder / f"{split}_predictions.csv", index=False)
+        if split == "test":
+            metrics = {"threshold": threshold, "threshold_policy": args.threshold_policy,
+                       **summarize(labels, scores, threshold), **referral}
+            metrics["calibration_ece_10_bins"] = confidence_report(
+                labels, scores, threshold, folder, not args.no_plots)
+            pd.DataFrame([metrics]).to_csv(folder / "test_metrics.csv", index=False)
+            if not args.no_plots:
+                save_plots(labels, scores, threshold, folder)
+
+
 def main() -> None:
     args = parse_args()
     if args.batch_size < 1 or args.image_size < 1 or args.workers < 0:
         raise ValueError("batch-size and image-size must be positive and workers cannot be negative.")
 
+    if not 0 <= args.referral_fraction <= 1:
+        raise ValueError("referral-fraction must be between 0 and 1")
+    if args.prototype and args.model != "siamese_aux":
+        raise ValueError("--prototype requires --model siamese_aux")
     split_dir = Path(args.splits)
     checkpoint_path = Path(args.checkpoint)
     output_dir = Path(args.output)
@@ -291,7 +345,7 @@ def main() -> None:
         if not path.is_file():
             raise FileNotFoundError(f"Required file not found: {path}")
 
-    # Audit all partitions; training JPEGs are not needed for inference.
+    # Audit all partitions; training JPEGs are needed only for prototypes.
     frames = load_splits(split_dir, args.duplicates)
     val_df, test_df = frames["val"], frames["test"]
 
@@ -300,13 +354,13 @@ def main() -> None:
     image_paths = index_images(args.images)
     needed = {
         Path(str(name).strip()).stem
-        for frame in (val_df, test_df)
+        for frame in (list(frames.values()) if args.prototype else (val_df, test_df))
         for name in frame["image_name"]
     }
     missing = needed - image_paths.keys()
     if missing:
         raise FileNotFoundError(
-            f"{len(missing)} validation/test images are missing; examples: {sorted(missing)[:5]}"
+            f"{len(missing)} required split images are missing; examples: {sorted(missing)[:5]}"
         )
 
     # Experiment runs require CUDA; CPU smoke tests must opt in explicitly.
@@ -315,7 +369,7 @@ def main() -> None:
     # Score validation first to choose a cutoff, then apply that fixed cutoff
     # to test. This preserves the notebook's separation between threshold
     # selection and final held-out reporting.
-    val_logits, val_labels, _ = infer(model, args.model, val_df, image_paths, args, device)
+    val_logits, val_labels, val_names = infer(model, args.model, val_df, image_paths, args, device)
     test_logits, test_labels, test_names = infer(model, args.model, test_df, image_paths, args, device)
     # The notebooks report sigmoid scores as probabilities. For these binary
     # heads, sigmoid is monotonic, so AP/AUROC ranking is unchanged from logits;
@@ -342,11 +396,27 @@ def main() -> None:
 
     results = summarize(test_labels, test_scores, threshold)
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_manifest(output_dir, args, manifest_hashes(split_dir))
+    low, high = choose_referral_band(val_scores, threshold, args.referral_fraction)
+    referred, referral = referral_report(test_labels, test_scores, threshold, low, high)
+    results.update(referral)
+    results["calibration_ece_10_bins"] = confidence_report(
+        test_labels, test_scores, threshold, output_dir, not args.no_plots)
+    pd.DataFrame([profile_model(model, args.model, args.image_size, device)]).to_csv(
+        output_dir / "resource_profile.csv", index=False)
+    pd.DataFrame({"image_name": val_names, "target": val_labels,
+                  "score_logit": val_logits, "score_probability": val_scores,
+                  "prediction": (val_scores >= threshold).astype(int),
+                  "referred": (val_scores >= low) & (val_scores < high)}).to_csv(
+                      output_dir / "validation_predictions.csv", index=False)
     predictions = pd.DataFrame({
         # Keep both forms of the model output. `score` is included as a
         # convenient common column for the comparison notebook; it contains
         # the same probability as score_probability.
         "image_name": test_names,
+        "referred": referred,
+        "correct": (test_scores >= threshold) == test_labels,
+        "decision_confidence": np.where(test_scores >= threshold, test_scores, 1 - test_scores),
         "target": test_labels,
         "score_logit": test_logits,
         "score_probability": test_scores,
@@ -354,6 +424,11 @@ def main() -> None:
         "prediction": (test_scores >= threshold).astype(int),
     })
     predictions.to_csv(output_dir / "test_predictions.csv", index=False)
+    # Review these real errors visually; the script cannot establish their causes.
+    predictions.loc[~predictions.correct].sort_values("decision_confidence", ascending=False).to_csv(
+        output_dir / "failure_cases.csv", index=False)
+    if args.prototype:
+        evaluate_prototypes(model, frames, image_paths, args, device, output_dir)
     metrics = {
         "model": "Baseline ResNet-18" if args.model == "baseline" else "Siamese + auxiliary head",
         "threshold_policy": policy,
@@ -380,6 +455,10 @@ def main() -> None:
     print(f"Checkpoint: {checkpoint_path} (epoch {checkpoint.get('epoch')})")
     print(f"Validation threshold policy: {policy}")
     print(f"Cut-off: {threshold:.6g}")
+    print(f"Test accuracy: {results['accuracy']:.4f}; macro-F1: {results['macro_f1']:.4f}")
+    print(f"Benign precision: {results['benign_precision']:.4f}; recall: {results['benign_recall']:.4f}")
+    print(f"Test PR-AUC: {results['pr_auc']:.4f}; Brier score: {results['brier_score']:.4f}")
+    print(f"Referral rate: {results['referral_rate']:.4f}; unreferred melanoma misses: {results['unreferred_melanoma_misses']}")
     print(f"Test average precision: {results['average_precision']:.4f}")
     print(f"Test AUROC: {results['auroc']:.4f}")
     print(f"Melanoma precision: {results['melanoma_precision']:.4f}")

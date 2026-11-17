@@ -18,6 +18,7 @@ from dataset import ImageCache, ISICImageDataset, index_images, make_transform
 from modules import ResNet18Baseline
 from split_utils import load_splits
 from runtime import select_device
+from reporting import plot_history, write_manifest
 from training_utils import (prepare_output, atomic_save, atomic_csv, capture_rng,
                             restore_rng, manifest_hashes, validate_resume, Progress, epoch_complete)
 
@@ -127,7 +128,10 @@ def main():
         restore_rng(checkpoint["rng"])
         print(f"Resuming after epoch {start_epoch}", flush=True)
 
+    write_manifest(output, args, hashes, "resume_manifest.json" if args.resume else "run_manifest.json")
     for epoch in range(start_epoch, args.epochs):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         model.train()
         loss_sum, seen, started = 0.0, 0, time.time()
         progress = Progress("train", epoch + 1, args.epochs, len(train_loader), args.log_every)
@@ -144,10 +148,12 @@ def main():
 
         model.eval()
         logits_all, labels, names = [], [], []
+        validation_loss = 0.0
         progress = Progress("validation", epoch + 1, args.epochs, len(val_loader), args.log_every)
         with torch.inference_mode():
             for batch, (x, y, image_names) in enumerate(val_loader, 1):
                 logits = model(x.to(device, non_blocking=True)).float()
+                validation_loss += criterion(logits, y.to(device, dtype=torch.float32)).item() * len(y)
                 logits_all.extend(logits.cpu().numpy().tolist())
                 labels.extend(y.numpy().tolist())
                 names.extend(image_names)
@@ -158,6 +164,8 @@ def main():
         auc = float(roc_auc_score(labels, logits_all))
         row = {"epoch": epoch + 1, "train_loss": loss_sum / max(seen, 1),
                "val_ap": ap, "val_auroc": auc, "seconds": time.time() - started}
+        row["val_classification_loss"] = validation_loss / len(val_ds)
+        row["peak_epoch_allocated_mib"] = torch.cuda.max_memory_allocated(device) / 2**20 if device.type == "cuda" else None
         history.append(row)
         probabilities = 1 / (1 + np.exp(-np.clip(np.asarray(logits_all), -40, 40)))
         predictions = pd.DataFrame({
@@ -177,6 +185,7 @@ def main():
                      "best_ap": best_ap, "history": history, "config": vars(args),
                      "rng": capture_rng(), "manifest_hashes": hashes}, last_path)
         atomic_csv(pd.DataFrame(history), output / "history.csv")
+        plot_history(history, output)
         epoch_complete(row, history, args.epochs)
     print(f"Best validation AP: {best_ap:.6f}; checkpoint: {best_path}")
 
