@@ -566,9 +566,35 @@ Epoch timing excludes cache construction, checkpoint I/O and plotting. Each trai
 
 Historical values are retained from the original notebook report. The rerun supersedes those measurements for assessing the repaired implementation. Siamese AUROC and recall improved, but its AP decreased; the repair does not improve every metric. Different pair sampling and environments prevent a controlled causal interpretation. No statistical uncertainty intervals or repeated-seed experiment were computed.
 
-### 8.4 Failure-case autopsy: outstanding evidence
+### 8.4 Selected failure cases: visual autopsy pending
 
-The new evaluation saves `failure_cases.csv` for each classifier, with image IDs, labels, scores and decisions. New visual failure panels and image-specific root-cause hypotheses have not yet been completed. The original seven-image autopsy is retained below as historical material only: its scores and error assignments must not be attributed to these new checkpoints. This reviewer request therefore remains outstanding. To complete it, select 3-5 new cases spanning false negatives, false positives and model disagreements; display the original image, true label, both model scores and thresholded decisions. Describe visible features such as occlusion, low contrast or lesion size only when actually observed, and distinguish plausible triggers from experimentally established causes. Do not infer causes from confidence scores alone.
+The following five cases were selected by matching image IDs in the completed rerun's two `failure_cases.csv` files. Each file contains 958 errors, consistent with the reported confusion counts. The selection covers errors unique to each classifier, a shared false positive and two shared false negatives. These are illustrative cases, not a representative sample of all errors.
+
+Scores are the recorded sigmoid outputs, interpreted against the validation-selected thresholds: **0.187727604 for ResNet-18** and **0.000115919 for Siamese**. They are not assumed to be calibrated probabilities. Referral below means membership in the experimental uncertainty band; positive predictions outside that band still require review in the proposed workflow.
+
+| Case / image filename | Ground truth | Siamese auxiliary classifier | ResNet-18 baseline | Uncertainty-band outcome |
+|---|---|---|---|---|
+| `ISIC_1412843.jpg` | Melanoma | False negative; score 0.000000181 | Correct melanoma prediction* | Siamese does not refer; baseline band status unavailable here. |
+| `ISIC_0207268.jpg` | Melanoma | Correct melanoma prediction* | False negative; score 0.029648 | Baseline does not refer; Siamese band status unavailable here. |
+| `ISIC_6352565.jpg` | Melanoma | False negative; score 0.000007889 | False negative; score 0.005200 | Siamese refers; baseline does not. |
+| `ISIC_0076545.jpg` | Benign | False positive; score 0.966976 | False positive; score 0.490800 | Neither falls inside its uncertainty band; both produce positive predictions. |
+| `ISIC_6251753.jpg` | Melanoma | False negative; score 0.000003815 | False negative; score 0.186391 | Baseline refers; Siamese does not. |
+
+*Correct classification is inferred from absence in the other model's complete failure list. Its exact score and referral status must be obtained from that model's full test-prediction CSV before completing the case panel. Failure files alone do not contain successful predictions.*
+
+The fifth case complements `ISIC_6352565`: both classifiers miss the melanoma, but the baseline's uncertainty band catches `ISIC_6251753`, whereas the Siamese band catches `ISIC_6352565`. This illustrates that a wrong classification and failure to flag uncertainty are separate outcomes. It does not establish that either referral policy is safe overall.
+
+**Selected report illustrations:** the five JPEGs below are included in `images/` under their original filenames. These selected cases support the report; the full image dataset remains outside the repository. Image-specific visual analysis is still pending.
+
+| Image | Visual autopsy status |
+|---|---|
+| ![ISIC_1412843: melanoma missed by Siamese](images/ISIC_1412843.jpg) | Pending image inspection. |
+| ![ISIC_0207268: melanoma missed by ResNet-18](images/ISIC_0207268.jpg) | Pending image inspection. |
+| ![ISIC_6352565: melanoma missed by both classifiers](images/ISIC_6352565.jpg) | Pending image inspection. |
+| ![ISIC_0076545: benign lesion flagged by both classifiers](images/ISIC_0076545.jpg) | Pending image inspection. |
+| ![ISIC_6251753: melanoma missed by both classifiers](images/ISIC_6251753.jpg) | Pending image inspection. |
+
+For each panel, describe observed lesion size, contrast, pigmentation, border appearance and any occluding artefacts, then explain a plausible failure trigger. Distinguish visible observations from hypotheses: neither a score nor the error category establishes the cause. The five image-specific analyses remain outstanding until the images are inspected. Historical panels below retain their original scores and must not be substituted for this rerun evidence.
 
 ## 9 Conclusion
 
